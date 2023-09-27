@@ -48,6 +48,8 @@
         "streambuf": "c",
         "typeinfo": "c",
         "assert.h": "c",
-        "map": "c"
+        "map": "c",
+        "list": "cpp",
+        "http_conn.h": "c"
     }
 }

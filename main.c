@@ -15,11 +15,30 @@
 #include<iostream>
 #include<fstream>
 
+#include"./lock/locker.h"
+#include"./threadpool/thread_pool.h"
 #include"./http/http_conn.h"
+
 
 #define MAX_FD 65536 //max fd count
 #define MAX_EVENT_NUMBER 10000
 
+#define listenfdLT //水平触发阻塞
+
+extern int addfd(int epollfd, int fd, bool one_shot);
+extern int remove(int epollfd, int fd);
+extern int setnonblocking(int fd);
+
+void addsig(int sig, void(handler)(int), bool restart = true)
+{
+    struct sigaction sa;
+    memset(&sa, '\0', sizeof(sa));
+    sa.sa_handler = handler;
+    if (restart)
+        sa.sa_flags |= SA_RESTART;
+    sigfillset(&sa.sa_mask);
+    assert(sigaction(sig, &sa, NULL) != -1);
+}
 int main(int argc, char* argv[]){
     if (argc <= 1)
     {
@@ -27,7 +46,18 @@ int main(int argc, char* argv[]){
         return 1;
     }
     int port = atoi(argv[1]);
-
+    addsig(SIGPIPE, SIG_IGN);//当一个进程尝试写入已经关闭的套接字（socket）时，操作系统会向该进程发送SIGPIPE信号
+    
+    //create the threadpool
+    ThreadPool<HttpConn> *pool = NULL;
+    try
+    {
+        pool = new ThreadPool<HttpConn>();
+    }
+    catch(...)
+    {
+        return 1;
+    }
     HttpConn *users = new HttpConn[MAX_FD];
     assert(users);
 
@@ -73,17 +103,8 @@ int main(int argc, char* argv[]){
     }
 
     
-    epoll_event listen_fd_event;
-    listen_fd_event.data.fd = listenfd;
-    listen_fd_event.events = EPOLLIN;
-    listen_fd_event.events |= EPOLLET;
+    addfd(epollfd, listenfd, false);
 
-    //bind listenfd to epollfd
-    if(epoll_ctl(epollfd, EPOLL_CTL_ADD, listenfd, &listen_fd_event) == -1){
-        std::cout << "epoll_ctl error." << std::endl;
-        close(listenfd);
-        return -1;
-    }
     HttpConn::m_epollfd = epollfd;
     int n;
     int count = 0;
@@ -122,7 +143,7 @@ int main(int argc, char* argv[]){
                 //clientfd: recv data.
                 }else{
                     if(users[sockfd].read_once()){
-                        users[sockfd].process();
+                        pool->append(users + sockfd);
                         std::cout << "client fd: " << sockfd << " calling process func." << std::endl;
                     }else{
                         std::cout << "Error: read_once!" << std::endl;
@@ -132,13 +153,15 @@ int main(int argc, char* argv[]){
             //TODO: ignore the error.
             }else if(epoll_events[i].events & EPOLLOUT){
                 if(users[sockfd].write()){
-                    std::cout << "sent data to brower." << std::endl;
+                    std::cout << "users[sockfd].write():sent data to brower." << std::endl;
                 }
-                else std::cout << "ERROR: sending data to brower." << std::endl;
+                else std::cout << "users[sockfd].write(): error." << std::endl;
             }
         }
         
     }
     close(listenfd);
+    close(epollfd);
+    delete[] users;
     return 0;
 }

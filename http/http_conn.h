@@ -2,6 +2,7 @@
 #define HTTPCONNECTION_H
 
 #include <unistd.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <sys/stat.h>
 #include <sys/types.h>

@@ -4,6 +4,12 @@
 #include<fstream>
 #include<iostream>
 
+//#define connfdET //边缘触发非阻塞
+#define connfdLT //水平触发阻塞
+
+//#define listenfdET //边缘触发非阻塞
+#define listenfdLT //水平触发阻塞
+
 //define message info of HTTP response.
 const char *ok_200_title = "OK";
 const char *error_400_title = "Bad Request";
@@ -15,17 +21,53 @@ const char *error_404_form = "The requested file was not found on this server.\n
 const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the request file.\n";
 const char *doc_root = "/home/jyp/cpp_proj/MyWebserver/root";
-
-//register read event.
-void addfd(int epollfd, int fd, bool oneshoot){
+//nonblocking for fd.
+int setnonblocking(int fd)
+{
+    int old_option = fcntl(fd, F_GETFL);
+    int new_option = old_option | O_NONBLOCK;
+    fcntl(fd, F_SETFL, new_option);
+    return old_option;
+}
+//将内核事件表注册读事件，ET模式，选择开启EPOLLONESHOT
+void addfd(int epollfd, int fd, bool oneshoot)
+{
     epoll_event event;
     event.data.fd = fd;
 
+#ifdef connfdET
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+#endif
+
+#ifdef connfdLT
     event.events = EPOLLIN | EPOLLRDHUP;
-    if(oneshoot)
+#endif
+
+#ifdef listenfdET
+    event.events = EPOLLIN | EPOLLET | EPOLLRDHUP;
+#endif
+
+#ifdef listenfdLT
+    event.events = EPOLLIN | EPOLLRDHUP;
+#endif
+
+    if (oneshoot)
         event.events |= EPOLLONESHOT;
     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
+    setnonblocking(fd);
 }
+
+
+// //register read event.
+// void addfd(int epollfd, int fd, bool oneshoot){
+//     epoll_event event;
+//     event.data.fd = fd;
+
+//     event.events = EPOLLIN | EPOLLRDHUP;
+//     if(oneshoot)
+//         event.events |= EPOLLONESHOT;
+//     epoll_ctl(epollfd, EPOLL_CTL_ADD, fd, &event);
+// }
 
 //register ONESHOOT event.
 void modfd(int epollfd, int fd, int event){
@@ -321,7 +363,7 @@ bool HttpConn::write(){
     while(1){
         temp = writev(m_sockfd, m_iv, m_iv_count);
 
-        if(-1 >= temp){
+        if(0 > temp){
             if(EAGAIN == errno){
                 //register write event.
                 modfd(m_epollfd, m_sockfd, EPOLLOUT);
@@ -348,7 +390,7 @@ bool HttpConn::write(){
         //all data have sent.
         if(0 >= bytes_to_send){
             unmap();
-            std::cout << "all data sent, register EPOLLIN event." << std::endl;
+            // std::cout << "all data sent, register EPOLLIN event." << std::endl;
             modfd(m_epollfd, m_sockfd, EPOLLIN);
             if(m_linger){
                 init();
@@ -471,6 +513,7 @@ void HttpConn::process(){
 
     bool write_ret = process_write(read_ret);
     if(!write_ret){
+        std::cout << "!write_ret, 关闭conn连接！" << std::endl;
         close_conn();
     }
     std::cout << "要发送的报文：" << std::endl;
