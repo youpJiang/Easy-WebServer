@@ -50,6 +50,8 @@
         "assert.h": "c",
         "map": "c",
         "list": "cpp",
-        "http_conn.h": "c"
+        "http_conn.h": "c",
+        "sql_connection_pool.h": "c",
+        "locker.h": "c"
     }
 }

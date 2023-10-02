@@ -12,6 +12,8 @@
 #include <stdarg.h>
 #include <fcntl.h>
 
+#include "../CGImysql/sql_connection_pool.h"
+
 
 class HttpConn{
 public:
@@ -74,6 +76,7 @@ public:
     void process(); // thread call this func to parsing message.
     bool read_once(); // read all the data sent from client.
     bool write();
+    void initmysql_result(ConnectionPool *connpool);
 private:
     //init private vars.
     void init();
@@ -109,6 +112,7 @@ private:
 public:
     static int m_epollfd;
     static int m_user_count;
+    MYSQL *mysql;
 
 private:
     int m_sockfd;
@@ -137,6 +141,7 @@ private:
     struct stat m_file_stat; //such as size ,time created, time used, time edited.
     struct iovec m_iv[2];   //for muti-element arr.
     int m_iv_count;
+    int cgi;                //whether message is POST
     char *m_string;     //storage the POST data.
     int bytes_to_send;
     int bytes_have_send;

@@ -21,6 +21,36 @@ const char *error_404_form = "The requested file was not found on this server.\n
 const char *error_500_title = "Internal Error";
 const char *error_500_form = "There was an unusual problem serving the request file.\n";
 const char *doc_root = "/home/jyp/cpp_proj/MyWebserver/root";
+
+//get user&password from mysql and put in map.
+map<string, string> user_passwd;
+Locker lock;
+
+void HttpConn::initmysql_result(ConnectionPool *connpool)
+{
+    //get a conn from connpool.
+    MYSQL *mysql = NULL;
+    ConnectionRAII mysqlcon(&mysql, connpool);
+
+    if (mysql_query(mysql, "SELECT username,passwd FROM user"))
+    {
+        cout << "SELECT error!" << endl;
+    }
+    //Retrieve the complete result set from the table
+    MYSQL_RES *result = mysql_store_result(mysql);
+    //返回结果集中的列数
+    int num_fields = mysql_num_fields(result);
+
+    //返回所有字段结构的数组
+    MYSQL_FIELD *fields = mysql_fetch_fields(result);
+    while (MYSQL_ROW row = mysql_fetch_row(result))
+    {
+        string temp1(row[0]);
+        string temp2(row[1]);
+        user_passwd[temp1] = temp2;
+    }
+}
+
 //nonblocking for fd.
 int setnonblocking(int fd)
 {
@@ -108,6 +138,7 @@ void HttpConn::init(int sockfd, const sockaddr_in &addr){
 
 
 void HttpConn::init(){
+    mysql = NULL;
     bytes_to_send = 0;
     bytes_have_send = 0;
     m_check_state = CHECK_STATE_REQUESTLINE;
@@ -121,6 +152,7 @@ void HttpConn::init(){
     m_start_line = 0;
     m_checked_idx = 0;
     m_write_idx = 0;
+    cgi = 0;
     memset(m_read_buf, '\0', READ_BUFFER_SIZE);
     memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
     memset(m_real_file, '\0', FILENAME_LEN);
@@ -174,6 +206,7 @@ HttpConn::HTTP_CODE HttpConn::parse_request_line(char *text){
         m_method = GET;
     }else if(0 == strcasecmp(method, "POST")){
         m_method = POST;
+        cgi = 1;
     }else return BAD_REQUEST;       //GET OR POST only.
 
     m_url += strspn(m_url, " \t");
@@ -238,6 +271,81 @@ HttpConn::HTTP_CODE HttpConn::do_request(){
     int len = strlen(doc_root);
     const char *p = strrchr(m_url,'/');
 
+    if(*(p + 1) == '2' || *(p + 1) == '3')
+    {
+        char *m_url_real = (char *)malloc(sizeof(char) * 200);
+        strcpy(m_url_real, "/");
+        strcat(m_url_real, m_url + 2);
+        strncpy(m_real_file + len, m_url_real, FILENAME_LEN - len - 1);
+        free(m_url_real);
+
+        char name[100], passwd[100];
+        int i;
+        for(i = 5; m_string[i] != '&'; ++i)
+            name[i-5] = m_string[i];
+        name[i-5] = '\0';
+
+        int j = 0;
+        for(i = i + 10; m_string[i] != '\0'; ++i, ++j)
+            passwd[j] = m_string[i];
+        passwd[j] = '\0';
+
+        //whether log
+        if('2' == *(p + 1))
+        {
+            if(user_passwd.find(name) != user_passwd.end() && user_passwd[name] == passwd)
+            {
+                strcpy(m_url, "/welcome.html");
+                cout << "登录成功——跳转欢迎界面：" << m_url<< endl;
+            }
+            else
+            {
+                strcpy(m_url, "/logError.html");
+                cout << "登录失败——跳转失败界面：" << m_url<< endl;
+            }
+        }
+        //whether register
+        else if ('3' == *(p + 1))
+        {
+            //this account is not registered, regiter it and go to log page.
+            if(user_passwd.find(name) == user_passwd.end())
+            {
+                char *sql_insert = (char *)malloc(sizeof(char) * 200);
+                strcpy(sql_insert, "INSERT INTO user(username, passwd) VALUES(");
+                strcat(sql_insert, "'");
+                strcat(sql_insert, name);
+                strcat(sql_insert, "','");
+                strcat(sql_insert, passwd);
+                strcat(sql_insert, "')");
+
+                // lock.lock();
+                int res = mysql_query(mysql, sql_insert);
+                if(res)
+                {
+                    cout << "successful!" << endl;
+                }
+                else{
+                    cout << "false!" << endl;
+                }
+                user_passwd.insert(pair<string, string>(name,passwd));
+                // lock.unlock();
+
+                if(!res)
+                {
+                    strcpy(m_url, "/log.html");
+                }
+                else{
+                    strcpy(m_url, "/registerError.html");
+                    std::cout << "sql数据插入失败！" << std::endl;
+                }
+
+            }
+            else
+                strcpy(m_url, "/registerError.html");
+        }
+        
+
+    }
     // /0:register page.
     if(*(p + 1) == '0'){
         char *m_url_real = (char *)malloc(sizeof(char) * 200);

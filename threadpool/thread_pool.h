@@ -5,11 +5,12 @@
 #include<list>
 #include<exception>
 #include "../lock/locker.h"
+#include "../CGImysql/sql_connection_pool.h"
 
 template<typename T>
 class ThreadPool final{
 public:
-    ThreadPool(int threadnum = 8,int maxtask = 1000);
+    ThreadPool(ConnectionPool *connpool,  int threadnum = 8,int maxtask = 1000);
     ~ThreadPool();
     bool append(T* task);
 
@@ -33,10 +34,12 @@ private:
     pthread_t *m_threads;
     //locker which protect the task queue.
     Locker m_queuelocker;
+    //database connection pool
+    ConnectionPool *m_connpool;
 };
 
 template<typename T>
-ThreadPool<T>::ThreadPool(int threadnum, int maxtask):m_thread_number(threadnum),m_max_requests(maxtask),m_stop(false), m_threads(NULL)
+ThreadPool<T>::ThreadPool(ConnectionPool *connpool, int threadnum, int maxtask):m_thread_number(threadnum),m_max_requests(maxtask),m_stop(false), m_threads(NULL), m_connpool(connpool)
 {
     if(0 >= threadnum || 0 >= maxtask) 
         throw std::exception();
@@ -100,6 +103,7 @@ void ThreadPool<T>::run()
         m_queuelocker.unlock();
         if(!task)
             continue;
+        ConnectionRAII mysqlcon(&task->mysql,m_connpool);
         task->process();
     }
 }

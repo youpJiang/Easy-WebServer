@@ -16,6 +16,7 @@
 #include<fstream>
 
 #include"./lock/locker.h"
+#include"./CGImysql/sql_connection_pool.h"
 #include"./threadpool/thread_pool.h"
 #include"./http/http_conn.h"
 
@@ -48,11 +49,15 @@ int main(int argc, char* argv[]){
     int port = atoi(argv[1]);
     addsig(SIGPIPE, SIG_IGN);//当一个进程尝试写入已经关闭的套接字（socket）时，操作系统会向该进程发送SIGPIPE信号
     
+    //create sql connection pool.
+    ConnectionPool *sqlpool = ConnectionPool::GetInstance();
+    sqlpool->Init("localhost", "root", "youpjiang", "webserver_db", 3306, 8);
+
     //create the threadpool
     ThreadPool<HttpConn> *pool = NULL;
     try
     {
-        pool = new ThreadPool<HttpConn>();
+        pool = new ThreadPool<HttpConn>(sqlpool);
     }
     catch(...)
     {
@@ -61,6 +66,7 @@ int main(int argc, char* argv[]){
     HttpConn *users = new HttpConn[MAX_FD];
     assert(users);
 
+    users->initmysql_result(sqlpool);
     //create listenfd
     int listenfd = socket(AF_INET, SOCK_STREAM, 0);
     if(listenfd == -1){
@@ -163,5 +169,6 @@ int main(int argc, char* argv[]){
     close(listenfd);
     close(epollfd);
     delete[] users;
+    delete pool;
     return 0;
 }
