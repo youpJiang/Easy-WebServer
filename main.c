@@ -1,28 +1,26 @@
-#include<assert.h>
-#include<sys/types.h>
-#include<sys/socket.h>
-#include<sys/uio.h>
-#include<sys/mman.h>
-#include<arpa/inet.h>
-#include<unistd.h>
-#include<fcntl.h>
-#include<sys/epoll.h>
-#include<poll.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <cassert>
+#include <string.h>
+#include <sys/epoll.h>
 #include<iostream>
-#include<string.h>
-#include<vector>
-#include<errno.h>
-#include<iostream>
-#include<fstream>
 
 #include"./lock/locker.h"
 #include"./CGImysql/sql_connection_pool.h"
 #include"./threadpool/thread_pool.h"
 #include"./http/http_conn.h"
+#include"./timer/timer.h"
 
 
 #define MAX_FD 65536 //max fd count
 #define MAX_EVENT_NUMBER 10000
+#define TIMESLOT 5 //to trigger SIGALRM
 
 #define listenfdLT //水平触发阻塞
 
@@ -30,6 +28,27 @@ extern int addfd(int epollfd, int fd, bool one_shot);
 extern int remove(int epollfd, int fd);
 extern int setnonblocking(int fd);
 
+//set timer related args.
+static int pipefd[2];
+static SortTimerList timerlist;
+static int epollfd;
+
+//process SIG.
+void sig_handler(int sig)
+{
+    int save_errno = errno;
+    int msg = sig;
+    send(pipefd[1], (char *)&msg, 1, 0);
+    errno = save_errno;
+}
+//handle timer task, retime to continuously trigger the SIGALRM.
+void timer_handler()
+{
+    timerlist.Tick();
+    alarm(TIMESLOT);
+}
+
+//set handler for different signal.
 void addsig(int sig, void(handler)(int), bool restart = true)
 {
     struct sigaction sa;
@@ -40,6 +59,20 @@ void addsig(int sig, void(handler)(int), bool restart = true)
     sigfillset(&sa.sa_mask);
     assert(sigaction(sig, &sa, NULL) != -1);
 }
+
+//callback func in timer, delete event in core events table and close fd.
+void callback_func(ClientData* userdata)
+{
+    //delete event
+    epoll_ctl(epollfd, EPOLL_CTL_DEL, userdata->sockfd_, 0);
+    assert(userdata);
+
+    //close fd.
+    close(userdata->sockfd_);
+    cout << "删除连接sockfd：" << userdata->sockfd_ << endl;
+    HttpConn::m_user_count--;
+}
+
 int main(int argc, char* argv[]){
     if (argc <= 1)
     {
@@ -100,39 +133,48 @@ int main(int argc, char* argv[]){
     }
 
     //create epollfd
-    int epollfd = epoll_create(1);
+    epollfd = epoll_create(1);
     
     if(-1 == epollfd){
         std::cout << "create epollfd error." << std::endl;
         close(listenfd);
         return -1;
     }
-
-    
     addfd(epollfd, listenfd, false);
 
     HttpConn::m_epollfd = epollfd;
-    int n;
-    int count = 0;
-    while(true){
+
+    if(-1 == socketpair(PF_UNIX, SOCK_STREAM, 0, pipefd)) //pipofd[0] read, [1] write.
+    {
+        std::cout << "socketpair create error." << std::endl;
+        return -1;
+    }
+    setnonblocking(pipefd[1]);
+    addfd(epollfd, pipefd[0], false);
+
+    addsig(SIGALRM, sig_handler, false);
+    addsig(SIGTERM, sig_handler, false);
+    bool stop_server = false;
+
+    ClientData *userstimer = new ClientData[MAX_FD];
+    bool timeout = false;
+    alarm(TIMESLOT);
+
+    while(!stop_server){
         epoll_event epoll_events[1024];
-        n = epoll_wait(epollfd, epoll_events, 1024, 1000);
-        if(n < 0){
+        int number = epoll_wait(epollfd, epoll_events, 1024, 1000);
+        if(number < 0){
             //signal interrupt
             if(EINTR == errno)continue;
             break;
-        }else if(n == 0){
+        }else if(number == 0){
             //time out, go on
             continue;
         }
 
-        for(size_t i = 0; i < n; ++i){
+        for(size_t i = 0; i < number; ++i){
             int sockfd = epoll_events[i].data.fd;
-            //if event is readable
-            if(epoll_events[i].events & EPOLLIN){
-                std::cout << "EPOLLIN:" << sockfd <<std::endl;
-                //listenfd: get the new clientfd
-                if(sockfd == listenfd){
+            if(sockfd == listenfd){
                     sockaddr_in clientaddr;
                     socklen_t clientaddrlen = sizeof(clientaddr);
                     int clientfd = accept(listenfd, (struct sockaddr*)&clientaddr, &clientaddrlen);
@@ -145,30 +187,117 @@ int main(int argc, char* argv[]){
                         continue;
                     }
                     users[clientfd].init(clientfd, clientaddr);
+                    userstimer[clientfd].address_ = clientaddr;
+                    userstimer[clientfd].sockfd_ = sockfd;
 
-                //clientfd: recv data.
-                }else{
-                    if(users[sockfd].read_once()){
-                        pool->append(users + sockfd);
-                        std::cout << "client fd: " << sockfd << " calling process func." << std::endl;
-                    }else{
-                        std::cout << "Error: read_once!" << std::endl;
+                    Timer* timer = new Timer();
+                    timer->userdata_ = &userstimer[clientfd];
+                    timer->callback_func_ = callback_func;
+                    
+                    time_t cur = time(NULL);
+                    timer->expire_ = cur + 3 * TIMESLOT;
+                    userstimer[clientfd].timer_ = timer;
+                    timerlist.AddTimer(timer);
+            }
+            //if event is readable
+            else if(epoll_events[i].events & (EPOLLRDHUP | EPOLLHUP | EPOLLERR))
+            {
+                //close the conn and remove timer.
+                callback_func(&userstimer[sockfd]);
+                Timer* timer = userstimer[sockfd].timer_;
+                if(timer)
+                    timerlist.DelTimer(timer);
+            }
+            //recive SIGALRM
+            else if((sockfd == pipefd[0]) && (epoll_events[i].events & EPOLLIN))
+            {
+                char signals[1024];
+                int ret = recv(pipefd[0], signals, sizeof(signals), 0);
+                if(-1 == ret || 0 == ret)
+                {
+                    continue;
+                }
+                else
+                {
+                    for(int i = 0; i < ret; ++i)
+                    {
+                        switch(signals[i])
+                        {
+                        case SIGALRM:
+                        {
+                            timeout = true;
+                            break;
+                        }
+                        case SIGTERM:
+                        {
+                            stop_server = true;
+                        }
+                        }
                     }
                 }
-            }else if(epoll_events[i].events & EPOLLERR){
-            //TODO: ignore the error.
-            }else if(epoll_events[i].events & EPOLLOUT){
+                
+            }
+            else if(epoll_events[i].events & EPOLLIN){
+                //listenfd: get the new clientfd
+                Timer* timer = userstimer[sockfd].timer_;
+                if(users[sockfd].read_once()){
+                    pool->append(users + sockfd);
+                    std::cout << "client fd: " << sockfd << " calling process func." << std::endl;
+                    //timer delayed by 3 units, if data transmission.
+                    if(timer)
+                    {
+                        time_t cur = time(NULL);
+                        timer->expire_ = cur + 3 * TIMESLOT;
+                        timerlist.AdjTimer(timer);
+                    }
+                }else{
+                    //close the conn and remove timer;
+                    callback_func(&userstimer[sockfd]);
+                    if(timer)
+                    {
+                        timerlist.DelTimer(timer);
+                    }
+                    std::cout << "Error: read_once!——Close conn and remove timer!" << std::endl;
+                }
+            }
+            
+            
+            else if(epoll_events[i].events & EPOLLOUT){
+                Timer* timer = userstimer[sockfd].timer_;
                 if(users[sockfd].write()){
                     std::cout << "users[sockfd].write():sent data to brower." << std::endl;
+                    if(timer)
+                        {
+                            time_t cur = time(NULL);
+                            timer->expire_ = cur + 3 * TIMESLOT;
+                            timerlist.AdjTimer(timer);
+                        }
                 }
-                else std::cout << "users[sockfd].write(): error." << std::endl;
+                else 
+                {
+                    std::cout << "users[sockfd].write(): error.——Close conn and remove timer!" << std::endl;
+                    //close the conn and remove timer;
+                    callback_func(&userstimer[sockfd]);
+                    if(timer)
+                    {
+                        timerlist.DelTimer(timer);
+                    }
+                }
             }
+        }
+        if(timeout)
+        {
+            timer_handler();
+            timeout = false;
         }
         
     }
     close(listenfd);
     close(epollfd);
+    close(pipefd[0]);
+    close(pipefd[1]);
     delete[] users;
+    delete[] userstimer;
     delete pool;
     return 0;
 }

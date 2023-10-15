@@ -183,13 +183,16 @@ HttpConn::LINE_STATUS HttpConn::parse_line(){
 }
 
 bool HttpConn::read_once(){
-    if(m_read_idx >= READ_BUFFER_SIZE)return false;
+    if(m_read_idx >= READ_BUFFER_SIZE)
+        return false;
     int bytes_read = 0;
 
     //connfdLT
     bytes_read = recv(m_sockfd, m_read_buf, READ_BUFFER_SIZE - m_read_idx, 0);
-    if(bytes_read <=0 )return false;
     m_read_idx+=bytes_read;
+    if(bytes_read <=0 )
+        return false;
+    
     std::cout << std::endl << "read_once(): 收到报文如下" << std::endl;
     std::cout << m_read_buf << std::endl;
     return true;
